@@ -1,0 +1,44 @@
+from flask import Flask, jsonify, request
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+app = Flask(__name__)
+
+# Pre-trained model setup
+model = LogisticRegression()
+
+# Load pre-trained data (reuse your friend's code to train it initially)
+df = pd.read_csv("simulated_usage.txt")
+df['Hour_Numeric'] = df['Hour'].str.split(':').str[0].astype(int)
+df['Is_Home'] = (df['Load_kW'] >= 0.7).astype(int)
+
+X = df[['Hour_Numeric', 'Load_kW']]
+y = df['Is_Home']
+model.fit(X, y)
+
+# API Endpoints
+@app.route('/predict', methods=['POST'])
+def predict_home_activity():
+    """Predicts active hours based on electricity usage."""
+    data = request.json  # Expecting JSON payload with Hour_Numeric and Load_kW
+    input_data = pd.DataFrame(data)
+    predictions = model.predict(input_data)
+    input_data['Is_Home_Predicted'] = predictions
+    return jsonify(input_data.to_dict(orient='records'))
+
+@app.route('/routes', methods=['GET'])
+def calculate_routes():
+    """Calculates nurse routes based on active patients."""
+    # Mock patient data
+    patients = [
+        {"name": "Patient A", "address": "123 Elm St", "is_home": True},
+        {"name": "Patient B", "address": "456 Oak St", "is_home": False},
+        {"name": "Patient C", "address": "789 Pine St", "is_home": True}
+    ]
+    # Filter active patients
+    active_patients = [p for p in patients if p['is_home']]
+    return jsonify({"active_patients": active_patients})
+
+if __name__ == '__main__':
+    app.run(debug=True)
