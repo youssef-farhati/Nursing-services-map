@@ -1,117 +1,116 @@
 from flask import Flask, jsonify, request
-from flask_cors import CORS
-from sklearn.linear_model import LogisticRegression
-import pandas as pd
-import numpy as np
-from twilio.rest import Client
+import googlemaps
 
 app = Flask(__name__)
-CORS(app)  # Enable cross-origin requests for frontend integration
 
-# Twilio setup (replace with your Twilio credentials)
-account_sid = "your_account_sid"
-auth_token = "your_auth_token"
-twilio_client = Client(account_sid, auth_token)
+# Google Maps API Key
+gmaps = googlemaps.Client(key="YOUR_GOOGLE_MAPS_API_KEY")
 
-# Global storage for patients and nurses
-patients = {}
-nurses = {}
+# Mock data for patients and nurses
+patients = []
+nurses = []
 
-# Logistic Regression Model
-model = LogisticRegression()
+# Assign patients to nurses based on proximity
+def assign_patients_to_nurses(nurse_locations, patient_addresses):
+    assignments = {nurse: [] for nurse in nurse_locations}
 
-# Load and train model with example data
-def train_model():
-    df = pd.read_csv("simulated_usage.txt")  # Replace with your data file
-    df['Hour_Numeric'] = df['Hour'].str.split(':').str[0].astype(int)
-    df['Is_Home'] = (df['Load_kW'] >= 0.7).astype(int)
-    X = df[['Hour_Numeric', 'Load_kW']]
-    y = df['Is_Home']
-    model.fit(X, y)
+    for patient in patient_addresses:
+        distances = []
+        for nurse in nurse_locations:
+            result = gmaps.distance_matrix(origins=nurse, destinations=patient, mode="driving")
+            distance = result["rows"][0]["elements"][0]["distance"]["value"]  # Distance in meters
+            distances.append(distance)
+        closest_nurse_index = distances.index(min(distances))
+        closest_nurse = nurse_locations[closest_nurse_index]
+        assignments[closest_nurse].append(patient)
 
-train_model()
+    return assignments
 
-# Twilio Notification Function
-def send_notification(phone_number, message):
-    twilio_client.messages.create(
-        to=phone_number,
-        from_="your_twilio_number",  # Replace with your Twilio number
-        body=message
+# Optimize route for a single nurse
+def optimize_route(start_location, patient_addresses):
+    if not patient_addresses:
+        return {"error": "No patient addresses provided."}
+
+    destination = patient_addresses[-1]
+    waypoints = patient_addresses[:-1]
+
+    directions_result = gmaps.directions(
+        origin=start_location,
+        destination=destination,
+        waypoints=waypoints,
+        optimize_waypoints=True,
+        mode="driving"
     )
 
-# API Endpoints
+    if directions_result:
+        route = directions_result[0]
+        optimized_waypoints = route.get("waypoint_order", [])
+        steps = [
+            step["html_instructions"]
+            for leg in route["legs"]
+            for step in leg["steps"]
+        ]
+        return {
+            "optimized_waypoints": optimized_waypoints,
+            "route_steps": steps,
+            "total_distance": route["legs"][0]["distance"]["text"],
+            "total_duration": route["legs"][0]["duration"]["text"],
+        }
+    else:
+        return {"error": "No route found."}
 
-@app.route('/patients', methods=['POST'])
-def add_patient():
-    """Add a new patient."""
-    data = request.json
-    if data["name"] in patients:
-        return jsonify({"error": "Patient already exists"}), 400
-    patients[data["name"]] = {
-        "address": data["address"],
-        "phone": data["phone"],
-        "electricity_usage": []
-    }
-    return jsonify({"message": "Patient added successfully"}), 200
+# Optimize routes for all nurses
+def optimize_routes_for_all_nurses():
+    nurse_locations = [nurse["location"] for nurse in nurses]
+    patient_addresses = [patient["address"] for patient in patients]
 
-@app.route('/patients', methods=['GET'])
-def get_patients():
-    """Retrieve all patients."""
-    return jsonify(patients), 200
+    assignments = assign_patients_to_nurses(nurse_locations, patient_addresses)
 
-@app.route('/patients/<name>/electricity', methods=['POST'])
-def add_electricity_usage(name):
-    """Add electricity usage data for a patient."""
-    if name not in patients:
-        return jsonify({"error": "Patient not found"}), 404
-    data = request.json
-    patients[name]["electricity_usage"].append(data)
-    return jsonify({"message": "Electricity data added successfully"}), 200
+    optimized_routes = {}
+    for nurse_location, assigned_patients in assignments.items():
+        optimized_routes[nurse_location] = optimize_route(nurse_location, assigned_patients)
 
-@app.route('/predict', methods=['POST'])
-def predict_activity():
-    """Predict if patients are active based on electricity data."""
-    data = request.json  # Expects JSON with Hour_Numeric and Load_kW
-    input_data = pd.DataFrame(data)
-    predictions = model.predict(input_data)
-    input_data['Is_Home_Predicted'] = predictions
-    return jsonify(input_data.to_dict(orient='records')), 200
+    return optimized_routes
 
-@app.route('/routes', methods=['GET'])
-def calculate_routes():
-    """Calculate routes for nurses based on active patients."""
-    active_patients = []
-    for patient, details in patients.items():
-        if details["electricity_usage"]:
-            latest_data = details["electricity_usage"][-1]
-            hour_numeric = latest_data["Hour_Numeric"]
-            load_kW = latest_data["Load_kW"]
-            is_home = model.predict([[hour_numeric, load_kW]])[0]
-            if is_home:
-                active_patients.append({"name": patient, "address": details["address"]})
-                # Notify the nurse
-                send_notification(
-                    details["phone"],
-                    f"{patient} is active and ready for a visit!"
-                )
-    # Mock route calculation
-    nurse_routes = {"nurse_1": active_patients}
-    return jsonify(nurse_routes), 200
 
+# Flask Endpoints
 @app.route('/nurses', methods=['POST'])
 def add_nurse():
     """Add a new nurse."""
     data = request.json
-    if data["name"] in nurses:
-        return jsonify({"error": "Nurse already exists"}), 400
-    nurses[data["name"]] = {"assigned_patients": []}
-    return jsonify({"message": "Nurse added successfully"}), 200
+    nurse = {"name": data["name"], "location": data["location"]}
+    nurses.append(nurse)
+    return jsonify({"message": "Nurse added successfully", "nurse": nurse}), 201
+
 
 @app.route('/nurses', methods=['GET'])
 def get_nurses():
     """Retrieve all nurses."""
     return jsonify(nurses), 200
 
-# Run the app
+
+@app.route('/patients', methods=['POST'])
+def add_patient():
+    """Add a new patient."""
+    data = request.json
+    patient = {"name": data["name"], "address": data["address"]}
+    patients.append(patient)
+    return jsonify({"message": "Patient added successfully", "patient": patient}), 201
+
+
+@app.route('/patients', methods=['GET'])
+def get_patients():
+    """Retrieve all patients."""
+    return jsonify(patients), 200
+
+
+@app.route('/routes', methods=['GET'])
+def get_routes():
+    """Generate and retrieve optimized routes for nurses."""
+    optimized_routes = optimize_routes_for_all_nurses()
+    return jsonify(optimized_routes), 200
+
+
+# Run Flask App
 if __name__ == '__main__':
     app.run(debug=True)
